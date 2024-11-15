@@ -835,7 +835,7 @@ class xp_system(commands.Cog):
     async def reload(self, ctx: commands.Context):
         print("Reloading XP system")
         await ctx.send("Reloading XP system...")
-        self.bot.reload_extension("test_extension")
+        self.bot.reload_extension("xp_system_extension")
 
     @debug.command(
             extras={"required_permissions":["debug"]}
