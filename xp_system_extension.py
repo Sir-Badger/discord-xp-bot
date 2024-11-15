@@ -777,7 +777,7 @@ class xp_system(commands.Cog):
             raise notifyUserException("This is a bot user and as such does not have any characters")
         
         characters = await self.db.get_available_characters(member.id)
-        pool_id = await self.db.get_pool_by_account(member.id) if len(characters) == 0 else characters[0].pool_id
+        pool_id = await self.db.get_pool_by_account(member.id)
         
         members = await self.db.fetch(f"SELECT account_id FROM {self.db.acc_table} WHERE pool_id = {pool_id}")
         if type(members) == tuple: members = [members]
