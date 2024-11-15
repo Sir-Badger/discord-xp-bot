@@ -22,7 +22,7 @@ PyMySQL==1.1.1
 python-dateutil==2.9.0.post0
 pytz==2024.2
 PyYAML==6.0.2
-setuptools==75.2.0
+setuptools
 six==1.16.0
 types-python-dateutil==2.9.0.20241003
 tzlocal==5.2
