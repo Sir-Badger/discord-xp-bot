@@ -704,6 +704,7 @@ class xp_system(commands.Cog):
             extras={"required_permissions":["manage_characters_self"]}
     )
     async def edit(self, ctx: commands.Context, *args):
+        characters = await self.db.get_available_characters(ctx.author.id)
         character = await self.db.get_active_character(ctx.author.id)
 
         name, color, url = None, None, None
