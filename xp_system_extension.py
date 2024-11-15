@@ -782,8 +782,9 @@ class xp_system(commands.Cog):
         members = await self.db.fetch(f"SELECT account_id FROM {self.db.acc_table} WHERE pool_id = {pool_id}")
         if type(members) == tuple: members = [members]
 
-        await ctx.send(f"Characters in {'your' if member == ctx.author else f'{member.display_name}\'s'} pool:\n{', '.join([c.name.capitalize() for c in characters])}\n\n" \
-                       f"Accounts sharing {'your' if member == ctx.author else f'{member.display_name}\'s'} pool:\n{', '.join([f'<@{m[0]}>' for m in members])}")
+        whose_pool_str = 'your' if member == ctx.author else member.display_name+"'s"
+        await ctx.send(f"Characters in {whose_pool_str} pool:\n{', '.join([c.name.capitalize() for c in characters])}\n\n" \
+                       f"Accounts sharing {whose_pool_str} pool:\n{', '.join([f'<@{m[0]}>' for m in members])}")
 
     @pool.command(
             extras={"required_permissions":["manage_pools_self"]}
