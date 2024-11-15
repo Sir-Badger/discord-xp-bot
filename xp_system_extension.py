@@ -698,7 +698,7 @@ class xp_system(commands.Cog):
             if not await self.cog_check(ctx): raise commands.CheckFailure()
             
         await self.db.add_character_to_db(member.id, name.lower())
-        await ctx.send(f"Added character '{name.capitalize()}' and set it as active on {'your' if member == ctx.author else member.mention+'\'s'} account")
+        await ctx.send(f"Added character '{name.capitalize()}' and set it as active on {'your account' if member == ctx.author else member.mention}")
 
     @char.command(
             extras={"required_permissions":["manage_characters_self"]}
