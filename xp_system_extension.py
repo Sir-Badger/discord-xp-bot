@@ -580,9 +580,9 @@ class xp_system(commands.Cog):
         emb.description += f"**Roleplay xp this period:** `{character.roleplay_xp}/{roleplay_cap}`\n" if roleplay_cap else ""
 
         # rank
-        ranked = await self.db.fetch(f"SELECT character_name, total_xp, owner_id FROM {self.db.char_table} ORDER BY total_xp DESC;")
+        ranked = await self.db.fetch(f"SELECT character_name, total_xp, owner_id, character_id FROM {self.db.char_table} ORDER BY total_xp DESC;")
         if type(ranked) == tuple: ranked = [ranked]
-        rank = ranked.index((character.name, character.total_xp, character.owner_id)) + 1
+        rank = [r[3] for r in ranked].index(character.id) + 1
         rank_above = "" if rank == 1 else f"> {rank-1}. {ranked[rank-2][0].capitalize()} - {ranked[rank-2][1]} xp (<@{ranked[rank-2][2]}>)\n"
         rank_text = f"> {rank}. **{character.name.capitalize()} - {character.total_xp} xp** (<@{member.id}>)"
         rank_below = "" if rank == len(ranked) else f"\n> {rank+1}. {ranked[rank][0].capitalize()} - {ranked[rank][1]} xp (<@{ranked[rank][2]}>)"
