@@ -304,9 +304,9 @@ class xp_system_db_connection(commands.Cog):
                 changes["character_color"] = "NULL"
             else:
                 try:
-                    int(kwargs["character_color"], 16)
                     c = kwargs["character_color"].removeprefix("0x")
                     c = c.removeprefix("#")
+                    int(c, 16)
                     changes["character_color"] = f'\'{c[-6:]}\''
                 except ValueError:
                     raise notifyUserException("The specified color is not a valid hex code.")
