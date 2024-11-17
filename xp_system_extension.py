@@ -562,7 +562,7 @@ class xp_system(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.notification_channel = self.bot.get_channel(self.nofitication_channel)
+        self.notification_channel = self.bot.get_channel(self.notification_channel)
 
     # basic commands
     @commands.command(
