@@ -294,17 +294,20 @@ class xp_system_db_connection(commands.Cog):
 
         # name - check lenght/if the name is already taken in the pool
         if "character_name" in kwargs:
-            if len(str(kwargs["character_name"])) <=32:
+            n = str(kwargs["character_name"])
+            if len(n) <=32 and '"' not in n and "'" not in n:
                 changes["character_name"] = f'\'{str(kwargs["character_name"]).lower()}\''
             else:
-                raise notifyUserException("The specified name is too long.")
+                raise notifyUserException("The specified name needs to be 32 characters or less, and cannot contain ' or \", or any characters that aren't UTF-8")
         if "character_color" in kwargs:
             if kwargs["character_color"].lower() in ("none","null"):
                 changes["character_color"] = "NULL"
             else:
                 try:
                     int(kwargs["character_color"], 16)
-                    changes["character_color"] = f'\'{kwargs["character_color"].removeprefix("0x")[-6:]}\''
+                    c = kwargs["character_color"].removeprefix("0x")
+                    c = c.removeprefix("#")
+                    changes["character_color"] = f'\'{c[-6:]}\''
                 except ValueError:
                     raise notifyUserException("The specified color is not a valid hex code.")
         if "character_image" in kwargs:
@@ -380,7 +383,7 @@ class xp_system(commands.Cog):
         self.db: xp_system_db_connection = self.bot.get_cog("xp_system_db_connection")
 
         self.debug: bool = configuration["debug"]
-        self.notification_channel: int = self.bot.get_channel(configuration["nofitication_channel"])
+        self.notification_channel = configuration["notification_channel"]
         self.confirmation_timeout: float = 5
 
         # permissions
@@ -556,6 +559,10 @@ class xp_system(commands.Cog):
 
         except notifyUserException: # no active character
             pass
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self.notification_channel = self.bot.get_channel(self.nofitication_channel)
 
     # basic commands
     @commands.command(
@@ -784,7 +791,8 @@ class xp_system(commands.Cog):
 
         whose_pool_str = 'your' if member == ctx.author else member.display_name+"'s"
         await ctx.send(f"Characters in {whose_pool_str} pool:\n{', '.join([c.name.capitalize() for c in characters])}\n\n" \
-                       f"Accounts sharing {whose_pool_str} pool:\n{', '.join([f'<@{m[0]}>' for m in members])}")
+                       f"Accounts sharing {whose_pool_str} pool:\n{', '.join([f'<@{m[0]}>' for m in members])}",
+                       allowed_mentions=discord.AllowedMentions.none())
 
     @pool.command(
             extras={"required_permissions":["manage_pools_self"]}
@@ -800,7 +808,7 @@ class xp_system(commands.Cog):
         if await self.ask_confirmation(ctx, f"You are about to merge <@{a}>'s and <@{b}>'s pools"):
             await self.db.merge_pools(a, b)
 
-            await ctx.send(f"Merged <@{a}>'s pool into <@{b}>'s pool")
+            await ctx.send(f"Merged <@{a}>'s and <@{b}>'s pools")
 
     @pool.command(
             extras={"required_permissions":["manage_pools_self"]}
