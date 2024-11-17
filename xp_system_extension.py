@@ -5,6 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from rp_word_counter import count
 from datetime import datetime, timezone
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 # extension functions
 def setup(bot):
@@ -19,6 +20,13 @@ def setup(bot):
     loop.create_task(db._start_scheduler()) # start scheduler
 
     bot.add_cog(xp_system(bot, config))
+
+def clean_url(url):
+    if url[0] == "<" and url[-1] == ">": url = url[1:-1]
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query))  # Parse and reformat query
+    cleaned_query = urlencode(query)  # Re-encode query string
+    return urlunparse(parsed._replace(query=cleaned_query))
 
 # Util classes
 class player_character():
@@ -311,11 +319,14 @@ class xp_system_db_connection(commands.Cog):
                 except ValueError:
                     raise notifyUserException("The specified color is not a valid hex code.")
         if "character_image" in kwargs:
-            print(kwargs["character_image"])
             if kwargs["character_image"].lower() in ("none","null"):
                 changes["character_image"] = "NULL"
             else:
-                url = str(kwargs["character_image"])
+                try:
+                    url = clean_url(str(kwargs["character_image"]))
+                except:
+                    raise notifyUserException("Invalid url")
+                
                 if validators.url(url):
                     changes["character_image"] = f'\"{url}\"'
                 else:
