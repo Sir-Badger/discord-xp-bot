@@ -5,24 +5,11 @@ import mysql.connector as mysql # mysql functions
 import time # for time purposes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler # async scheduler
 from apscheduler.triggers.cron import CronTrigger # timed trigger
-import yaml
-#import rp_word_counter as rp # word counting
+import yaml, os, subprocess
 
-with open('/'.join(__file__.split('/')[:-1])+'/conf.yaml', 'r') as file:
-    conf = yaml.safe_load(file)
-
-# discord related functions
-async def notify(member_list=[], msg="You have been notified!"): # notify role/member of something
-    mention_text="> "
-    for m in member_list: # loop through members to @
-        mention_text+=m.mention+" "
-
-    if mention_text != "> ":
-        pass
-        #await notify_channel.send(f"{mention_text}\n{msg}") # mention
-    else:
-        pass
-        #await notify_channel.send(f"{mention_text}{msg}") # mention
+file_dir = '/'.join(__file__.split('/')[:-1]) # get abs location of file
+with open(file_dir+'/conf.yaml', 'r') as file:
+    conf: dict = yaml.safe_load(file)
 
 # main & startup function
 print(" - building bot")
@@ -31,8 +18,10 @@ intents.message_content = True
 QuestBored = commands.Bot(command_prefix=conf['prefix'], intents=intents)
 
 print(" - loading extensions")
-QuestBored.load_extension("xp_system_extension")
+for extension in conf["extensions"]:
+    QuestBored.load_extension(extension)
 
+# event listeners
 @QuestBored.event
 async def on_ready():
     print( "===\n"\
@@ -40,5 +29,83 @@ async def on_ready():
           f" - prefix '{QuestBored.command_prefix}'\n"\
           f" - ping {QuestBored.latency * 1000} ms\n"\
            "===")
+
+# extension management    
+@QuestBored.group(
+    invoke_without_command=True
+)
+async def extensions(ctx: commands.Context):
+    available = set([f.removesuffix("_extension.py") for f in os.listdir(file_dir) if f.endswith("_extension.py")])
+    active = set([e.removesuffix("_extension") for e in QuestBored.__extensions])
+    unused = available.difference(active)
+    if len(unused) == 0: unused = ('-')
+
+    await ctx.send(f"Active extensions:\n{', '.join(active)}\nAvailable extensions:\n{', '.join(unused)}")
+
+@extensions.command(
+
+)
+async def reload(ctx: commands.Context, ext: str = None):
+    if not ext or ext not in QuestBored.__extensions:
+        raise Exception(f"'{ext}' is not a currently loaded extension.")
+    
+    m = await ctx.send(f"Reloading '{ext}' ...")
+    print(f"Reloading '{ext}' extension")
+    try:
+        QuestBored.reload_extension(ext)
+        await m.edit(f"Successfully reloaded '{ext}'")
+    except Exception as e:
+        await m.edit(f"Something went wrong when reloading '{ext}'\n```\n{e}```")
+
+@extensions.command(
+
+)
+async def load(ctx: commands.Context, ext: str = None):
+    if not ext or ext not in [f.removesuffix("_extension.py") for f in os.listdir(file_dir) if f.endswith("_extension.py")]:
+        raise Exception(f"'{ext}' is not an available extension.")
+    
+    m = await ctx.send(f"Loading '{ext}' ...")
+    print(f"Loading '{ext}' extension")
+    try:
+        QuestBored.load_extension(ext)
+        await m.edit(f"Successfully loaded '{ext}'")
+    except Exception as e:
+        await m.edit(f"Something went wrong when loading '{ext}'\n```\n{e}```")
+
+@extensions.command(
+
+)
+async def unload(ctx: commands.Context, ext: str = None):
+    if not ext or ext not in QuestBored.__extensions:
+        raise Exception(f"'{ext}' is not an active extension.")
+    
+    m = await ctx.send(f"Unloading '{ext}' ...")
+    print(f"Unloading '{ext}' extension")
+    try:
+        QuestBored.unload_extension(ext)
+        await m.edit(f"Successfully unloaded '{ext}'")
+    except Exception as e:
+        await m.edit(f"Something went wrong when unloading '{ext}'\n```\n{e}```")
+
+@extensions.command(
+
+)
+async def update(ctx: commands.Context):
+    m = await ctx.send("Updating code ...")
+    try:
+        subprocess.run("git pull", check=True)
+        await m.edit("Code updated")
+    except Exception as e:
+        await m.edit(f"Something went wrong when running `git pull` to update the code\n```\n{e}```")
+        return
+    
+    m = await ctx.send("Reloading extensions ...")
+    for ext in QuestBored.__extensions:
+        try:
+            QuestBored.reload_extension(ext)
+        except Exception as e:
+            await m.edit(f"Something went wrong when reloading '{ext}'\n```\n{e}```")
+            return
+    await m.edit("Successfully reloaded all extensions")
 
 QuestBored.run(conf['token'])
