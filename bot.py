@@ -97,7 +97,16 @@ async def unload(ctx: commands.Context, ext: str = None):
 async def update(ctx: commands.Context):
     m = await ctx.send("Updating code ...")
     try:
-        subprocess.run(args=["git","pull"], check=True)
+        print("Updating code via subprocess 'git pull'")
+        out = subprocess.run(cwd = file_dir,
+                             args = ["git","pull"],
+                             capture_output = True,
+                             check = True,
+                             text = True)
+        
+        for l in out.stdout.split("\n"):
+            print("> "+l)
+        
         await m.edit("Code updated")
     except Exception as e:
         await m.edit(f"Something went wrong when running `git pull` to update the code\n```\n{e}```")
@@ -105,9 +114,9 @@ async def update(ctx: commands.Context):
     
     m = await ctx.send("Reloading extensions ...")
     print("Reloading extensions")
-    for ext in QuestBored.extensions:
+    for ext in [e for e in QuestBored.extensions]:
         try:
-            QuestBored.reload_extension(ext+"_extension")
+            QuestBored.reload_extension(ext)
         except Exception as e:
             await m.edit(f"Something went wrong when reloading `{ext}`\n```\n{e}```")
             return
