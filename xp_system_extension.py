@@ -819,7 +819,7 @@ class xp_system(commands.Cog):
         if await self.ask_confirmation(ctx, f"You are about to merge <@{a}>'s and <@{b}>'s pools"):
             await self.db.merge_pools(a, b)
 
-            await ctx.send(f"Merged <@{a}>'s and <@{b}>'s pools")
+            await ctx.send(f"Merged <@{a}>'s and <@{b}>'s pools", allowed_mentions=discord.AllowedMentions.none())
 
     @pool.command(
             extras={"required_permissions":["manage_pools_self"]}
@@ -839,7 +839,7 @@ class xp_system(commands.Cog):
         if await self.ask_confirmation(ctx, f"You are about to seperate <@{a}>'s characters from <@{b}>'s pool"):
             await self.db.separate_pools(a, b)
 
-            await ctx.send(f"Seperated <@{a}>'s characters from <@{b}>'s pool")
+            await ctx.send(f"Seperated <@{a}>'s characters from <@{b}>'s pool", allowed_mentions=discord.AllowedMentions.none())
 
     # debug commands
     @commands.group(
