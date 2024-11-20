@@ -11,7 +11,7 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 def setup(bot):
     # load conf
     with open('/'.join(__file__.split('/')[:-1])+'/conf.yaml', 'r') as file:
-        config = yaml.safe_load(file)["xp_system"]
+        config = yaml.safe_load(file)["extensions"]["xp_system"]
 
     bot.add_cog(xp_system_db_connection(bot, config))
     db = bot.get_cog("xp_system_db_connection")
