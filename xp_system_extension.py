@@ -254,7 +254,7 @@ class xp_system_db_connection(commands.Cog):
 
     async def get_available_characters(self, account_id: int) -> list[player_character]:
         pool_id = await self.get_pool_by_account(account_id)
-        characters = await self.fetch(f"SELECT * FROM {self.char_table} WHERE pool_id = {pool_id}")
+        characters = await self.fetch(f"SELECT * FROM {self.char_table} WHERE pool_id = {pool_id} ORDER BY character_name;")
 
         if type(characters) == tuple: # if there's only one, wrap it in a list
             characters = [characters]
@@ -636,7 +636,7 @@ class xp_system(commands.Cog):
 
         characters = await self.db.get_available_characters(ctx.author.id)
         characters = [f"**{ranked.index((c.name, c.total_xp, c.owner_id))+1}.** {c.name.capitalize()} - {c.total_xp} xp" for c in characters]
-        characters.sort()
+        characters.sort(key=lambda s: int(s.split("**")[1][:-1]))
 
         emb.add_field(name= "Your ranks:", value="\n".join(characters))
 
