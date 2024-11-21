@@ -254,7 +254,7 @@ class xp_system_db_connection(commands.Cog):
 
     async def get_available_characters(self, account_id: int) -> list[player_character]:
         pool_id = await self.get_pool_by_account(account_id)
-        characters = await self.fetch(f"SELECT * FROM {self.char_table} WHERE pool_id = {pool_id}")
+        characters = await self.fetch(f"SELECT * FROM {self.char_table} WHERE pool_id = {pool_id} ORDER BY character_name;")
 
         if type(characters) == tuple: # if there's only one, wrap it in a list
             characters = [characters]
@@ -394,7 +394,7 @@ class xp_system(commands.Cog):
         self.db: xp_system_db_connection = self.bot.get_cog("xp_system_db_connection")
 
         self.debug: bool = configuration["debug"]
-        self.notification_channel = configuration["notification_channel"]
+        self.notification_channel_id = configuration["notification_channel"]
         self.confirmation_timeout: float = 5
 
         # permissions
@@ -539,7 +539,8 @@ class xp_system(commands.Cog):
         xp_til_level = self._get_xp_until_lvl_up(character)
         if xp_til_level and xp_til_level <= 0 and character.level_notification:
             await self.db.set_properties_of_character(character.id, level_notification = 0)
-            await self.notification_channel.send(f"> <@{character.active_on_account if character.active_on_account else character.owner_id}>\nYou have enough experience to level up to lvl **{character.level+1}**! :sparkles:")
+            notification_channel = self.bot.get_channel(self.notification_channel_id)
+            await notification_channel.send(f"> <@{character.active_on_account if character.active_on_account else character.owner_id}>\nYou have enough experience to level up to lvl **{character.level+1}**! :sparkles:")
 
     # discord functionality
     # listeners
@@ -570,10 +571,6 @@ class xp_system(commands.Cog):
 
         except notifyUserException: # no active character
             pass
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        self.notification_channel = self.bot.get_channel(self.notification_channel)
 
     # basic commands
     @commands.command(
@@ -636,7 +633,7 @@ class xp_system(commands.Cog):
 
         characters = await self.db.get_available_characters(ctx.author.id)
         characters = [f"**{ranked.index((c.name, c.total_xp, c.owner_id))+1}.** {c.name.capitalize()} - {c.total_xp} xp" for c in characters]
-        characters.sort()
+        characters.sort(key=lambda s: int(s.split("**")[1][:-1]))
 
         emb.add_field(name= "Your ranks:", value="\n".join(characters))
 
@@ -819,7 +816,7 @@ class xp_system(commands.Cog):
         if await self.ask_confirmation(ctx, f"You are about to merge <@{a}>'s and <@{b}>'s pools"):
             await self.db.merge_pools(a, b)
 
-            await ctx.send(f"Merged <@{a}>'s and <@{b}>'s pools")
+            await ctx.send(f"Merged <@{a}>'s and <@{b}>'s pools", allowed_mentions=discord.AllowedMentions.none())
 
     @pool.command(
             extras={"required_permissions":["manage_pools_self"]}
@@ -839,7 +836,7 @@ class xp_system(commands.Cog):
         if await self.ask_confirmation(ctx, f"You are about to seperate <@{a}>'s characters from <@{b}>'s pool"):
             await self.db.separate_pools(a, b)
 
-            await ctx.send(f"Seperated <@{a}>'s characters from <@{b}>'s pool")
+            await ctx.send(f"Seperated <@{a}>'s characters from <@{b}>'s pool", allowed_mentions=discord.AllowedMentions.none())
 
     # debug commands
     @commands.group(
