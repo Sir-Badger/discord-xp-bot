@@ -394,7 +394,7 @@ class xp_system(commands.Cog):
         self.db: xp_system_db_connection = self.bot.get_cog("xp_system_db_connection")
 
         self.debug: bool = configuration["debug"]
-        self.notification_channel = configuration["notification_channel"]
+        self.notification_channel_id = configuration["notification_channel"]
         self.confirmation_timeout: float = 5
 
         # permissions
@@ -539,7 +539,8 @@ class xp_system(commands.Cog):
         xp_til_level = self._get_xp_until_lvl_up(character)
         if xp_til_level and xp_til_level <= 0 and character.level_notification:
             await self.db.set_properties_of_character(character.id, level_notification = 0)
-            await self.notification_channel.send(f"> <@{character.active_on_account if character.active_on_account else character.owner_id}>\nYou have enough experience to level up to lvl **{character.level+1}**! :sparkles:")
+            notification_channel = self.bot.get_channel(self.notification_channel_id)
+            await notification_channel.send(f"> <@{character.active_on_account if character.active_on_account else character.owner_id}>\nYou have enough experience to level up to lvl **{character.level+1}**! :sparkles:")
 
     # discord functionality
     # listeners
@@ -570,10 +571,6 @@ class xp_system(commands.Cog):
 
         except notifyUserException: # no active character
             pass
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        self.notification_channel = self.bot.get_channel(self.notification_channel)
 
     # basic commands
     @commands.command(
