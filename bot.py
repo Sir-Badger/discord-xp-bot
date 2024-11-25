@@ -5,7 +5,7 @@ import mysql.connector as mysql # mysql functions
 import time # for time purposes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler # async scheduler
 from apscheduler.triggers.cron import CronTrigger # timed trigger
-import yaml, os, subprocess
+import yaml, os, subprocess, traceback
 
 file_dir = '/'.join(__file__.split('/')[:-1]) # get abs location of file
 with open(file_dir+'/conf.yaml', 'r') as file:
@@ -29,6 +29,22 @@ async def on_ready():
           f" - prefix '{QuestBored.command_prefix}'\n"\
           f" - ping {QuestBored.latency * 1000} ms\n"\
            "===")
+
+debug = False
+
+@QuestBored.listen()
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    emb = discord.Embed(color=0x800000)
+    
+    if type(error) == commands.CheckFailure:
+        emb.description = f"You're missing permissions to use that command.\nYou need the following permissions: `{', '.join(ctx.command.extras['required_permissions'])}`"
+    elif isinstance(error, commands.UserInputError):
+        emb.description = "User input error"
+    else:
+        emb.title = type(error).__name__
+        emb.description = f"{str(error)}" if not debug else f"```\n{'\n'.join(traceback.format_exception(error))}```"
+    
+    await ctx.send(embed=emb)   
 
 # extension management    
 @QuestBored.group(

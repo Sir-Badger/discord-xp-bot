@@ -444,21 +444,6 @@ class xp_system(commands.Cog):
         else:
             return True
 
-    async def cog_command_error(self, ctx: commands.Context, error: commands.CommandError):
-        emb = discord.Embed(color=0x800000)
-
-        if type(error.__cause__) == notifyUserException:
-            emb.description = str(error.__cause__)
-        elif type(error) == commands.CheckFailure:
-            emb.description = f"You're missing permissions to use that command.\nYou need the following permissions: `{', '.join(ctx.command.extras['required_permissions'])}`"
-        elif isinstance(error, commands.UserInputError):
-            emb.description = "User input error"
-        else:
-            emb.title = type(error).__name__
-            emb.description = f"{str(error)}" if not self.debug else f"```\n{traceback.format_exc()}```"
-        
-        await ctx.send(embed=emb)
-
     # internal functions
     def _proccess_msg_for_rp(self, character: player_character, message_content: str) -> tuple[int, int]:
         words = count(message_content)
