@@ -398,7 +398,6 @@ class xp_system(commands.Cog):
         self.confirmation_timeout: float = 5
 
         # permissions
-        self.default_perms: list = configuration["permissions"]["default"]
         self.role_permissions = {}
         base_perms = set(configuration["permissions"]["basic_permissions"])
         for role, perms in configuration["permissions"]["roles"].items():
@@ -431,7 +430,7 @@ class xp_system(commands.Cog):
         except:
             return True # no perms attached to command
         
-        permissions = self.default_perms # get permissions
+        permissions = [] # build permissions
         for r in [r.id for r in ctx.author.roles]:
             if r in self.role_permissions:
                 permissions.extend(self.role_permissions[r])
