@@ -8,25 +8,19 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 # extension functions
-def setup(bot):
+def setup(bot: discord.Bot):
     # load conf
     with open('/'.join(__file__.split('/')[:-1])+'/conf.yaml', 'r') as file:
         config = yaml.safe_load(file)["extensions"]["xp_system"]
 
-    bot.add_cog(xp_system_db_connection(bot, config))
-    db = bot.get_cog("xp_system_db_connection")
-    loop = asyncio.get_event_loop()
-    loop.create_task(db._build_pool()) # connect to db
-    loop.create_task(db._start_scheduler()) # start scheduler
-
     bot.add_cog(xp_system(bot, config))
 
-def clean_url(url):
-    if url[0] == "<" and url[-1] == ">": url = url[1:-1]
-    parsed = urlparse(url)
-    query = dict(parse_qsl(parsed.query))  # Parse and reformat query
-    cleaned_query = urlencode(query)  # Re-encode query string
-    return urlunparse(parsed._replace(query=cleaned_query))
+    c = bot.get_cog("xp_system")
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(c.db.build_pool()) # connect to db
+    if c.has_periodic_reset:
+        loop.create_task(c.start_reset_scheduler())
 
 # Util classes
 class player_character():
@@ -55,169 +49,112 @@ class notifyUserException(Exception):
     """Raised to notify a member in discord when something goes wrong (like them inputting a wrong argument)"""
     pass
 
-# cogs
-class xp_system_db_connection(commands.Cog):
-    """A cog that handles interacting with a MySQL database asynchronously with a pool of connections."""
-
-    def __init__(self, bot:discord.bot, configuration):
-        self.bot = bot
-
-        # connection handling
-        self.stable_pool = asyncio.Event()
-        self.crash_time: datetime = None
-        self.waiting_executions = 0
-        self.stagger_time = 0.25
-        self.max_retries = 3
-
-        # periodic reset
-        if "periodic_cap" in configuration:
-            self.reset_cron = configuration["periodic_cap"]["cron"]
-            self.reset_tz = configuration["periodic_cap"]["timezone"]
-
-        # db info
+class db_manager():
+    def __init__(self, configuration):
+        # db properties
+        self.pool = None
         self.credentials: dict = configuration["database"]["credentials"]
+        self.max_connections: int = configuration["database"]["max_connections"]
+
+        # xp system specifications
         self.max_characters_per_pool: int = configuration["max_characters_per_pool"]
         self.char_table: str = configuration["database"]["char_table"]
         self.acc_table: str  = configuration["database"]["acc_table"]
         self.min_level: int  = list(configuration["level_req"].keys())[0]
         self.max_level: int  = list(configuration["level_req"].keys())[-1]
 
-    def cog_unload(self): # make sure to close the connection
-        loop = asyncio.get_event_loop()
-        loop.create_task(self._close_pool())
-        
-        self.scheduler.shutdown(wait=False)
-
-        return super().cog_unload()
-    
-    # connection & err handling
-    async def _build_pool(self):
+    async def build_pool(self):
         print(" - building connection pool")
         try:
-            self._connection_pool = await mysql.create_pool(minsize=1, maxsize=5, **self.credentials)
-            self.stable_pool.set()
+            self.pool = await mysql.create_pool(minsize=1, maxsize=self.max_connections, **self.credentials)
         except mysql.InterfaceError as e:
             print(f"Something went wrong when trying to establish a connection to the db:\n{e}")
             return
-
-    async def _rebuild_pool(self):
-        print("rebuilding pool")
-        try:
-            await self._close_pool()
-            await self._build_pool(self.credentials)
-            print(f"rebuilt pool at {datetime.now(timezone.utc)} with {self.waiting_executions} waiting executions")
-            self.stable_pool.set()
-
-        except Exception as e:
-            print(f"Something went wrong when trying to rebuild:\n{e}")
-            pass
-
-    async def _close_pool(self):
+    
+    async def close_pool(self):
         print(" - closing connection pool")
-        self._connection_pool.close()
-        await self._connection_pool.wait_closed()
+        self.pool.close()
+        await self.pool.wait_closed()
 
-    # periodic reset
-    async def _start_scheduler(self):
-        print(" - starting periodic reset scheduler")
-        self.scheduler = AsyncIOScheduler()
-        self.scheduler.start()
+class db_transaction():
+    def __init__(self, db: db_manager, commit:bool = False):
+        self.db = db
+        self._connection: mysql.Connection = None
+        self._cursor: mysql.Cursor = None
+        self.commit: bool = commit
+        self.error: bool = False
+        self.remaining_retries = 3
 
-        self.scheduler.add_job(
-            self.periodic_reset,
-            CronTrigger.from_crontab(
-                self.reset_cron, self.reset_tz
-            )
-        )
-
-    async def periodic_reset(self):
-        print("Reseting periodic cap")
-        await self.commit(f"UPDATE {self.char_table} SET roleplay_xp = 0;")
-
-
-    # general db operations
-    def _database_interaction(func):
+    # interaction decorator
+    def db_interaction(func):
         """a decorator that handles faulty connections and possible errors"""
 
         async def interaction(self, *args, **kwargs):
-            if not self.stable_pool.is_set():
-                wait_time_to_prevent_overload = self.waiting_executions * self.stagger_time
-                self.waiting_executions += 1
-
-                await self.stable_pool.wait() # wait for connection flag
-
-                # stagger the requests a little in case execution requests piled up
-                await asyncio.sleep(wait_time_to_prevent_overload)
-                self.waiting_executions -= 1
-            
-            retries = 0
-            while retries < self.max_retries:
+            while self.remaining_retries:
                 try:
-                    return await func(self, *args, **kwargs)
+                    # no error
+                    r = await func(self, *args, **kwargs)
+                    self.error = False
+                    return r
                 except mysql.OperationalError as e:
-                    retries += 1
-                    if retries >= self.max_retries: # retries fail
-                        if not self.stable_pool.is_set(): # rebuild sequence not yet initiated
-                            self.stable_pool.clear()
-                            self.crash_time = datetime.now(timezone.utc)
-                            print(f"Pool crashed at {self.crash_time} due to the following exception:\n\"{e}\"")
-                            await self._rebuild_pool()
-                        else: # if it is, wait until rebuilt
-                            self.stable_pool.wait()
-
-                        try: # try again
-                            return await func(self, *args, **kwargs)
-                        except Exception as er:
-                            print(f"An exception occured after rebuilding pool:")
-                            raise er
-                    
-                    await asyncio.sleep(2)
+                    # wait a second and try again
+                    self.error = True
+                    self.remaining_retries -= 1
+                    asyncio.sleep(5)
+                    print("retrying because of operational error")
                 except Exception as e:
                     raise e
 
         return interaction
 
-    @_database_interaction
-    async def fetch(self, statement:str) -> tuple|list[tuple]:
-        """A function for executing a single SELECT statement and fetching the result.
-        If the result is a single row it will return a tuple of that row.
-        If the result is multiple rows, it will return a list containing each result."""
-    
-        async with self._connection_pool.acquire() as conn:
-            cursor = await conn.cursor()
-            await cursor.execute(statement)
-            result = await cursor.fetchall()
-            await cursor.close()
+    # base interactions
+    @db_interaction 
+    async def __aenter__(self):
+        self._connection = await self.db.pool.acquire()
+        self._cursor = await self._connection.cursor()
 
+        await self.execute("START TRANSACTION;")
+
+        return self
+
+    @db_interaction
+    async def __aexit__(self, *excinfo):
+        if self.commit and not self.error:
+            #print(" - committing transaction")
+            await self._connection.commit()
+        else:
+            #print(" - rolling back transaction")
+            await self._connection.rollback()
+
+        await self._cursor.close()
+        await self.db.pool.release(self._connection)
+
+    @db_interaction
+    async def execute(self, statement):
+        await self._cursor.execute(statement)
+
+    @db_interaction
+    async def fetch_result(self, statement:str) -> tuple | list[tuple]:
+        if self.commit: statement = statement.replace(";"," FOR UPDATE;")
+        await self._cursor.execute(statement)
+        result = await self._cursor.fetchall()
         return result[0] if len(result) == 1 else list(result)
-       
-    @_database_interaction
-    async def commit(self, statement:str):
-        """A function for executing one or more statements and commiting the resulting changes.
-        For multiple statements, they must be seperated with ';' as per SQL syntax"""
 
-        async with self._connection_pool.acquire() as conn:
-            cursor = await conn.cursor()
-            for s in statement.split(";"):
-                if s: await cursor.execute(s)
-            await cursor.close()
-            await conn.commit()
-
-    # specific operations
+    # specific interactions
     async def merge_pools(self, pool_a:int, pool_b:int):
         # merge a into b
         if pool_a == pool_b:
             raise notifyUserException("Cannot merge the same pool.")
         
-        c = await self.fetch(f"SELECT character_name FROM {self.char_table} WHERE pool_id = {pool_a} OR pool_id = {pool_b}")
+        c = await self.fetch_result(f"SELECT character_name FROM {self.db.char_table} WHERE pool_id = {pool_a} OR pool_id = {pool_b};")
         if type(c) == tuple: c = [c]
-        if len(c) > self.max_characters_per_pool:
+        if len(c) > self.db.max_characters_per_pool:
             raise notifyUserException("Merging these two pools would exceed the character limit")
         if len(c) != len(set(c)):
             raise notifyUserException("There are multiple characters with the same name in the pools you want to merge")
 
-        await self.commit(f"UPDATE {self.acc_table} SET pool_id = {pool_b} WHERE pool_id = {pool_a};"\
-                          f"UPDATE {self.char_table} SET pool_id = {pool_b} WHERE pool_id = {pool_a};")
+        await self.execute(f"UPDATE {self.db.acc_table} SET pool_id = {pool_b} WHERE pool_id = {pool_a};"\
+                          f"UPDATE {self.db.char_table} SET pool_id = {pool_b} WHERE pool_id = {pool_a};")
 
     async def separate_pools(self, acc_a:int, acc_b:int):
         # sep a from b
@@ -230,22 +167,22 @@ class xp_system_db_connection(commands.Cog):
             # shift all accounts in the pool other than a into pool_b
             # update all characters in shared pool accordingly
             # separate all characters owned by acc_a into pool_a
-            statement = f"UPDATE {self.acc_table} SET pool_id = {acc_b} WHERE pool_id = {shared_pool} AND account_id != {acc_a};"\
-                        f"UPDATE {self.char_table} SET pool_id = {acc_b} WHERE pool_id = {shared_pool};"\
-                        f"UPDATE {self.char_table} SET pool_id = {acc_a} WHERE owner_id = {acc_a};"
+            statement = f"UPDATE {self.db.acc_table} SET pool_id = {acc_b} WHERE pool_id = {shared_pool} AND account_id != {acc_a};"\
+                        f"UPDATE {self.db.char_table} SET pool_id = {acc_b} WHERE pool_id = {shared_pool};"\
+                        f"UPDATE {self.db.char_table} SET pool_id = {acc_a} WHERE owner_id = {acc_a};"
         else: # the pool belongs to b, or some other account
             # move acc_a out of shared pool
             # move all characters owned by acc_a into that pool
-            statement = f"UPDATE {self.acc_table} SET pool_id = {acc_a} WHERE account_id = {acc_a};"\
-                        f"UPDATE {self.char_table} SET pool_id = {acc_a} WHERE owner_id = {acc_a};"
+            statement = f"UPDATE {self.db.acc_table} SET pool_id = {acc_a} WHERE account_id = {acc_a};"\
+                        f"UPDATE {self.db.char_table} SET pool_id = {acc_a} WHERE owner_id = {acc_a};"
 
-        await self.commit(statement)
+        await self.execute(statement)
 
     async def add_pool_for_account(self, account_id: int):
-        await self.commit(f"INSERT INTO {self.acc_table} (account_id, pool_id) VALUES ({account_id}, {account_id})")
+        await self.execute(f"INSERT INTO {self.db.acc_table} (account_id, pool_id) VALUES ({account_id}, {account_id});")
 
     async def get_pool_by_account(self, account_id: int) -> int:
-        pool = await self.fetch(f"SELECT pool_id FROM {self.acc_table} WHERE account_id = {account_id}")
+        pool = await self.fetch_result(f"SELECT pool_id FROM {self.db.acc_table} WHERE account_id = {account_id};")
         if pool:
             return pool[0]
         else:
@@ -254,7 +191,7 @@ class xp_system_db_connection(commands.Cog):
 
     async def get_available_characters(self, account_id: int) -> list[player_character]:
         pool_id = await self.get_pool_by_account(account_id)
-        characters = await self.fetch(f"SELECT * FROM {self.char_table} WHERE pool_id = {pool_id} ORDER BY character_name;")
+        characters = await self.fetch_result(f"SELECT * FROM {self.db.char_table} WHERE pool_id = {pool_id} ORDER BY character_name;")
 
         if type(characters) == tuple: # if there's only one, wrap it in a list
             characters = [characters]
@@ -282,7 +219,7 @@ class xp_system_db_connection(commands.Cog):
 
     async def get_character(self, account_id:int, name:str) -> player_character:
         pool_id = await self.get_pool_by_account(account_id)
-        result = await self.fetch(f"SELECT * FROM {self.char_table} WHERE pool_id = {pool_id} AND character_name = '{name}';")
+        result = await self.fetch_result(f"SELECT * FROM {self.db.char_table} WHERE pool_id = {pool_id} AND character_name = '{name}';")
         if type(result) == tuple:
             return player_character(result)
         elif len(result) == 0:
@@ -290,10 +227,10 @@ class xp_system_db_connection(commands.Cog):
 
     async def switch_active_character(self, account_id: int, name: str):
         pool_id = await self.get_pool_by_account(account_id)
-        char = await self.fetch(f"SELECT character_name FROM {self.char_table} WHERE pool_id = {pool_id} AND character_name = '{name}'")
+        char = await self.fetch_result(f"SELECT character_name FROM {self.db.char_table} WHERE pool_id = {pool_id} AND character_name = '{name}';")
         if char:
-            await self.commit(f"UPDATE {self.char_table} SET active_on_account = 0 WHERE active_on_account = {account_id};" \
-                        f"UPDATE {self.char_table} SET active_on_account = {account_id} WHERE pool_id = {pool_id} AND character_name = '{name}'")
+            await self.execute(f"UPDATE {self.db.char_table} SET active_on_account = 0 WHERE active_on_account = {account_id};" \
+                        f"UPDATE {self.db.char_table} SET active_on_account = {account_id} WHERE pool_id = {pool_id} AND character_name = '{name}';")
         else:
             raise notifyUserException("The account doesn't have access to that character")
 
@@ -323,7 +260,14 @@ class xp_system_db_connection(commands.Cog):
                 changes["character_image"] = "NULL"
             else:
                 try:
-                    url = clean_url(str(kwargs["character_image"]))
+                    raw_url = str(kwargs["character_image"]) # get raw image url from user input
+                    # check if it's a valid url
+                    if raw_url[0] == "<" and url[-1] == ">": raw_url = raw_url[1:-1] # discord link escape
+                    parsed = urlparse(raw_url)
+                    query = dict(parse_qsl(parsed.query))  # Parse and reformat query
+                    cleaned_query = urlencode(query)  # Re-encode query string
+
+                    url = urlunparse(parsed._replace(query=cleaned_query))
                 except:
                     raise notifyUserException("Invalid url")
                 
@@ -342,7 +286,7 @@ class xp_system_db_connection(commands.Cog):
             else:
                 raise notifyUserException(f"Invalid value for roleplay_xp: {kwargs['roleplay_xp']}")
         if "level" in kwargs:
-            if type(kwargs["level"]) == int and kwargs["level"] >= self.min_level and kwargs["level"] <= self.max_level:
+            if type(kwargs["level"]) == int and kwargs["level"] >= self.db.min_level and kwargs["level"] <= self.db.max_level:
                 changes["level"] = kwargs["level"]
             else:
                 raise notifyUserException(f"Invalid value for level: {kwargs['level']}")
@@ -362,18 +306,18 @@ class xp_system_db_connection(commands.Cog):
         if "active_on_account" in kwargs: changes["active_on_account"] = int(kwargs["active_on_account"])
 
         if changes:
-            statement = f"UPDATE {self.char_table} SET {', '.join([f'{c[0]} = {c[1]}' for c in changes.items()])} WHERE character_id = {character_id};"
-            await self.commit(statement)
+            statement = f"UPDATE {self.db.char_table} SET {', '.join([f'{c[0]} = {c[1]}' for c in changes.items()])} WHERE character_id = {character_id};"
+            await self.execute(statement)
         else:
             raise notifyUserException("No valid changes given")
 
     async def add_character_to_db(self, account_id: int, name: str) -> player_character:
         pool_id = await self.get_pool_by_account(account_id)
 
-        characters = await self.fetch(f"SELECT character_name FROM {self.char_table} WHERE pool_id = {pool_id};")
+        characters = await self.fetch_result(f"SELECT character_name FROM {self.db.char_table} WHERE pool_id = {pool_id};")
         if characters:
             if type(characters) == tuple: characters = [characters] # if there's only one entry
-            if len(characters) >= self.max_characters_per_pool:
+            if len(characters) >= self.db.max_characters_per_pool:
                 raise notifyUserException("Reached character limit")
             if name.lower() in [c[0] for c in characters]:
                 raise notifyUserException("A character with the given name already exists")
@@ -381,21 +325,28 @@ class xp_system_db_connection(commands.Cog):
             raise notifyUserException("The desired name is too long. It needs to be 32 characters long or shorter.")
         if not name: name = "character"
 
-        await self.commit(f"UPDATE {self.char_table} SET active_on_account = 0 WHERE active_on_account = {account_id};" \
-                        f"INSERT INTO {self.char_table}" \
+        await self.execute(f"UPDATE {self.db.char_table} SET active_on_account = 0 WHERE active_on_account = {account_id};" \
+                        f"INSERT INTO {self.db.char_table}" \
                         "(character_name, owner_id, pool_id, active_on_account)" \
                         "VALUES"\
                         f"('{name.lower()}', {account_id}, {pool_id}, {account_id});")
-        return player_character(await self.fetch(f"SELECT * FROM {self.char_table} WHERE active_on_account = {account_id};"))
+        return player_character(await self.fetch_result(f"SELECT * FROM {self.db.char_table} WHERE active_on_account = {account_id};"))
 
+# cog
 class xp_system(commands.Cog):
     def __init__(self, bot:discord.bot, configuration):
         self.bot: commands.Bot = bot
-        self.db: xp_system_db_connection = self.bot.get_cog("xp_system_db_connection")
+        self.db: db_manager = db_manager(configuration)
 
         self.debug: bool = configuration["debug"]
         self.notification_channel_id = configuration["notification_channel"]
         self.confirmation_timeout: float = 5
+
+        # periodic reset
+        self.has_periodic_reset: bool = True if "periodic_cap" in configuration else False
+        if self.has_periodic_reset:
+            self.reset_cron = configuration["periodic_cap"]["cron"]
+            self.reset_tz = configuration["periodic_cap"]["timezone"]
 
         # permissions
         self.role_permissions = {}
@@ -458,6 +409,14 @@ class xp_system(commands.Cog):
         
         await ctx.send(embed=emb)
 
+    def cog_unload(self): # make sure to close the connection
+        loop = asyncio.get_event_loop()
+        loop.create_task(self.db.close_pool())
+        
+        self.scheduler.shutdown(wait=False)
+
+        return super().cog_unload()
+
     # internal functions
     def _proccess_msg_for_rp(self, character: player_character, message_content: str) -> tuple[int, int]:
         words = count(message_content)
@@ -467,7 +426,7 @@ class xp_system(commands.Cog):
         
         return (int(xp), overflow)
 
-    async def _get_member_and_char_from_args(self, ctx: commands.Context, args: tuple[str]) -> tuple[discord.Member, player_character]:
+    async def _get_member_and_char_from_args(self, ctx: commands.Context, transaction: db_transaction, args: tuple[str]) -> tuple[discord.Member, player_character]:
         if len(args) > 2:
             raise notifyUserException(f"Too many arguments given.")
         
@@ -493,7 +452,7 @@ class xp_system(commands.Cog):
         elif member.bot:
             raise notifyUserException("This is a bot user and as such does not have any characters")
                 
-        character = await self.db.get_character(member.id, character) if character else await self.db.get_active_character(member.id)
+        character = await transaction.get_character(member.id, character) if character else await transaction.get_active_character(member.id)
 
         return (member, character)
 
@@ -541,6 +500,23 @@ class xp_system(commands.Cog):
             notification_channel = self.bot.get_channel(self.notification_channel_id)
             await notification_channel.send(f"> <@{character.active_on_account if character.active_on_account else character.owner_id}>\nYou have enough experience to level up to lvl **{character.level+1}**! :sparkles:")
 
+    async def start_reset_scheduler(self):
+        print(" - starting periodic reset scheduler")
+        self.scheduler = AsyncIOScheduler()
+        self.scheduler.start()
+
+        self.scheduler.add_job(
+            self.periodic_reset,
+            CronTrigger.from_crontab(
+                self.reset_cron, self.reset_tz
+            )
+        )
+
+    async def periodic_reset(self):
+        print("Reseting periodic cap")
+        async with db_transaction(self.db) as t:
+            await t.execute(f"UPDATE {self.char_table} SET roleplay_xp = 0;")
+
     # discord functionality
     # listeners
     @commands.Cog.listener()
@@ -549,22 +525,23 @@ class xp_system(commands.Cog):
             return
 
         try:
-            character = await self.db.get_active_character(message.author.id)
-            gained_xp, overflow = self._proccess_msg_for_rp(character, message.content)
+            async with db_transaction(self.db, True) as t:
+                character = await t.get_active_character(message.author.id)
+                gained_xp, overflow = self._proccess_msg_for_rp(character, message.content)
             
-            cap = self._get_rp_cap(character)
-            if cap:
-                gained_xp = min(gained_xp, cap - character.roleplay_xp)
-                character.roleplay_xp = character.roleplay_xp + gained_xp           
-            character.total_xp += gained_xp
+                cap = self._get_rp_cap(character)
+                if cap:
+                    gained_xp = min(gained_xp, cap - character.roleplay_xp)
+                    character.roleplay_xp = character.roleplay_xp + gained_xp           
+                character.total_xp += gained_xp
 
-            if gained_xp or overflow:
-                await self.db.set_properties_of_character(
-                    character.id,
-                    total_xp = character.total_xp,
-                    roleplay_xp = character.roleplay_xp,
-                    words_cached = overflow
-                )
+                if gained_xp or overflow:
+                    await t.set_properties_of_character(
+                        character.id,
+                        total_xp = character.total_xp,
+                        roleplay_xp = character.roleplay_xp,
+                        words_cached = overflow
+                    )
             
             await self.check_and_notify_level_up(character)
 
@@ -576,7 +553,10 @@ class xp_system(commands.Cog):
             extras={"required_permissions":[]}
     )
     async def stats(self, ctx: commands.Context, *args):
-        member, character = await self._get_member_and_char_from_args(ctx, args)
+        async with db_transaction(self.db) as t:
+            member, character = await self._get_member_and_char_from_args(ctx, t, args)
+            ranked = await t.fetch_result(f"SELECT character_name, total_xp, owner_id, character_id FROM {self.db.char_table} ORDER BY total_xp DESC;")
+            accs = await t.fetch_result(f"SELECT account_id FROM {self.db.acc_table} WHERE pool_id = {character.pool_id};")
         
         emb = discord.Embed()
 
@@ -594,7 +574,6 @@ class xp_system(commands.Cog):
         emb.description += f"**Roleplay xp this period:** `{character.roleplay_xp}/{roleplay_cap}`\n" if roleplay_cap else ""
 
         # rank
-        ranked = await self.db.fetch(f"SELECT character_name, total_xp, owner_id, character_id FROM {self.db.char_table} ORDER BY total_xp DESC;")
         if type(ranked) == tuple: ranked = [ranked]
         rank = [r[3] for r in ranked].index(character.id) + 1
         rank_above = "" if rank == 1 else f"> {rank-1}. {ranked[rank-2][0].capitalize()} - {ranked[rank-2][1]} xp (<@{ranked[rank-2][2]}>)\n"
@@ -605,7 +584,6 @@ class xp_system(commands.Cog):
                       value = rank_above+rank_text+rank_below)
         
         # list of accounts the character is available to
-        accs = await self.db.fetch(f"SELECT account_id FROM {self.db.acc_table} WHERE pool_id = {character.pool_id};")
         if type(accs) == tuple: accs = [accs]
         emb.add_field(name=f" ",
                       inline = False,
@@ -619,18 +597,19 @@ class xp_system(commands.Cog):
             extras={"required_permissions":[]}
     )
     async def top(self, ctx: commands.Context):
-        ranked = await self.db.fetch(f"SELECT character_name, total_xp, owner_id FROM {self.db.char_table} ORDER BY total_xp DESC;")
-        if type(ranked) == tuple: ranked = [ranked]
-        
+        async with db_transaction(self.db) as t:
+            ranked = await t.fetch_result(f"SELECT character_name, total_xp, owner_id FROM {self.db.char_table} ORDER BY total_xp DESC;")
+            if type(ranked) == tuple: ranked = [ranked]
+
+            characters = await t.get_available_characters(ctx.author.id)    
+        # top ten
         emb = discord.Embed(title = "Top 10 characters by xp",
                             color = ctx.author.color)
         emb.set_thumbnail(url = "https://images-ext-1.discordapp.net/external/mGTL2XzYxMsQa3yZDqwbLaAWUjuqjDhZjhKbn_eX9Gw/https/images.emojiterra.com/twitter/v14.0/512px/1f3c6.png?format=webp&quality=lossless&width=412&height=412")
-
         top_ten = [f"**{r+1}.** {ranked[r][0].capitalize()} - {ranked[r][1]} xp (<@{ranked[r][2]}>)" for r in range(min(len(ranked), 10))]
-
         emb.description = "\n".join(top_ten)
 
-        characters = await self.db.get_available_characters(ctx.author.id)
+        # your list
         characters = [f"**{ranked.index((c.name, c.total_xp, c.owner_id))+1}.** {c.name.capitalize()} - {c.total_xp} xp" for c in characters]
         characters.sort(key=lambda s: int(s.split("**")[1][:-1]))
 
@@ -642,7 +621,9 @@ class xp_system(commands.Cog):
             extras={"required_permissions":[]}
     )
     async def level_up(self, ctx: commands.Context):
-        character = await self.db.get_active_character(ctx.author.id)
+        async with db_transaction(self.db) as t:
+            character = await t.get_active_character(ctx.author.id)
+        
         xp_remaining = self._get_xp_until_lvl_up(character)
 
         emb = discord.Embed(color = character.color if character.color else ctx.author.color)
@@ -668,12 +649,13 @@ class xp_system(commands.Cog):
             extras={"required_permissions":["manage_xp"]}
     )
     async def _add(self, ctx: commands.Context, amount: int, *args):
-        member, character = await self._get_member_and_char_from_args(ctx, args)
+        async with db_transaction(self.db, True) as t:
+            member, character = await self._get_member_and_char_from_args(ctx, t, args)
 
-        prev_total = character.total_xp
-        character.total_xp = character.total_xp + amount if character.total_xp + amount > 0 else 0
+            prev_total = character.total_xp
+            character.total_xp = character.total_xp + amount if character.total_xp + amount > 0 else 0
 
-        await self.db.set_properties_of_character(character.id, total_xp=character.total_xp)
+            await t.set_properties_of_character(character.id, total_xp=character.total_xp)
 
         await self.check_and_notify_level_up(character)
 
@@ -688,18 +670,20 @@ class xp_system(commands.Cog):
     )
     async def char(self, ctx: commands.Context, name: str = None):
         if name:
-            await self.db.switch_active_character(ctx.author.id, name)
-            await ctx.send(f"Switched active character to {name.capitalize()}")
+            async with db_transaction(self.db, True) as t:
+                await t.switch_active_character(ctx.author.id, name)
+                await ctx.send(f"Switched active character to {name.capitalize()}")
         else:
-            try:
-                active_character = await self.db.get_active_character(ctx.author.id)
-            except notifyUserException:
-                active_character = None
+            async with db_transaction(self.db) as t:
+                try:
+                    active_character = await t.get_active_character(ctx.author.id)
+                except notifyUserException:
+                    active_character = None
 
-            available_characters = await self.db.get_available_characters(ctx.author.id)
+                available_characters = await t.get_available_characters(ctx.author.id)
 
             await ctx.send(f"Current active character: {active_character.name.capitalize() if active_character else '-'}\n\n"\
-                           f"Available characters: {', '.join([c.name.capitalize() for c in available_characters])}")
+                        f"Available characters: {', '.join([c.name.capitalize() for c in available_characters])}")
 
     @char.command(
             extras={"required_permissions":["manage_characters_self"]}
@@ -710,39 +694,42 @@ class xp_system(commands.Cog):
         elif member != ctx.author:
             ctx.command.extras["required_permissions"].append("manage_characters_others")
             if not await self.cog_check(ctx): raise commands.CheckFailure()
-            
-        await self.db.add_character_to_db(member.id, name.lower())
+        
+        async with db_transaction(self.db, True) as t:
+            await t.add_character_to_db(member.id, name.lower())
+        
         await ctx.send(f"Added character '{name.capitalize()}' and set it as active on {'your account' if member == ctx.author else member.mention}")
 
     @char.command(
             extras={"required_permissions":["manage_characters_self"]}
     )
     async def edit(self, ctx: commands.Context, *args):
-        characters = await self.db.get_available_characters(ctx.author.id)
-        character = await self.db.get_active_character(ctx.author.id)
+        async with db_transaction(self.db, True) as t:
+            characters = await t.get_available_characters(ctx.author.id)
+            character = await t.get_active_character(ctx.author.id)
 
-        name, color, url = None, None, None
-        changes = {}
+            name, color, url = None, None, None
+            changes = {}
 
-        if len(args) > 3:
-            raise notifyUserException("Too many arguments")
-        
-        for arg in args:
-            if arg.startswith("-n=") or arg.startswith("-name="):
-                name = arg[3:] if arg.startswith("-n=") else arg[6:]
-                for c in characters:
-                    if name == c.name: raise notifyUserException("You already have a character with that name")
-            if arg.startswith("-c=") or arg.startswith("-color="):
-                color = arg[3:] if arg.startswith("-c=") else arg[7:]
-            if arg.startswith("-i=") or arg.startswith("-image="):
-                url = arg[3:] if arg.startswith("-i=") else arg[7:]
+            if len(args) > 3:
+                raise notifyUserException("Too many arguments")
+            
+            for arg in args:
+                if arg.startswith("-n=") or arg.startswith("-name="):
+                    name = arg[3:] if arg.startswith("-n=") else arg[6:]
+                    for c in characters:
+                        if name == c.name: raise notifyUserException("You already have a character with that name")
+                if arg.startswith("-c=") or arg.startswith("-color="):
+                    color = arg[3:] if arg.startswith("-c=") else arg[7:]
+                if arg.startswith("-i=") or arg.startswith("-image="):
+                    url = arg[3:] if arg.startswith("-i=") else arg[7:]
 
-        if name: changes["character_name"] = name.lower()
+            if name: changes["character_name"] = name.lower()
 
-        if color: changes["character_color"] = color
-        if url: changes["character_image"] = url
-        
-        await self.db.set_properties_of_character(character.id,
+            if color: changes["character_color"] = color
+            if url: changes["character_image"] = url
+            
+            await t.set_properties_of_character(character.id,
                                                 **changes)
 
         await ctx.send("Updated active character")
@@ -751,14 +738,15 @@ class xp_system(commands.Cog):
             extras={"required_permissions":["manage_characters_self"]}
     )
     async def delete(self, ctx: commands.Context, *args):
-        member, character = await self._get_member_and_char_from_args(ctx, args)
-        if member != ctx.author:
-            ctx.command.extras["required_permissions"].append("manage_characters_others")
-            if not await self.cog_check(ctx): raise commands.CheckFailure()
+        async with db_transaction(self.db, True) as t:
+            member, character = await self._get_member_and_char_from_args(ctx, t, args)
+            if member != ctx.author:
+                ctx.command.extras["required_permissions"].append("manage_characters_others")
+                if not await self.cog_check(ctx): raise commands.CheckFailure()
 
-        if await self.ask_confirmation(ctx, f"You are about to delete '{character.name.capitalize()}'"):
-            await self.db.commit(f"DELETE FROM {self.db.char_table} WHERE character_id = {character.id};")
-            await ctx.send(f"Deleted '{character.name.capitalize()}'")
+            if await self.ask_confirmation(ctx, f"You are about to delete '{character.name.capitalize()}'"):
+                await t.execute(f"DELETE FROM {self.db.char_table} WHERE character_id = {character.id};")
+                await ctx.send(f"Deleted '{character.name.capitalize()}'")
 
     @char.command(
             extras={"required_permissions":["manage_characters_self","manage_characters_others"]}
@@ -767,18 +755,19 @@ class xp_system(commands.Cog):
         if len(args) > 3 or len(args) < 2:
             raise notifyUserException("Incorrect number of arguments, 3 expected")
 
-        src, character = await self._get_member_and_char_from_args(ctx, args[:-1])
-        dest = await commands.MemberConverter().convert(ctx, args[-1])
+        async with db_transaction(self.db, True) as t:
+            src, character = await self._get_member_and_char_from_args(ctx, t, args[:-1])
+            dest = await commands.MemberConverter().convert(ctx, args[-1])
 
-        dest_pool = await self.db.get_pool_by_account(dest.id)
+            dest_pool = await t.get_pool_by_account(dest.id)
 
-        if await self.ask_confirmation(ctx, f"You are about to move '{character.name.capitalize()}' from <@{src.id}> to <@{dest.id}>"):
-            await self.db.set_properties_of_character(character.id,
+            if await self.ask_confirmation(ctx, f"You are about to move '{character.name.capitalize()}' from <@{src.id}> to <@{dest.id}>"):
+                await t.set_properties_of_character(character.id,
                                                     owner_id = dest.id,
                                                     pool_id = dest_pool,
                                                     active_on_account = 0)
-            
-            await ctx.send(f"Moved '{character.name.capitalize()}' from <@{src.id}> to <@{dest.id}>")
+                
+            await ctx.send(f"Moved '{character.name.capitalize()}' from <@{src.id}> to <@{dest.id}>", allowed_mentions=discord.AllowedMentions.none())
 
     # pool management
     @commands.group(
@@ -790,11 +779,12 @@ class xp_system(commands.Cog):
         elif member.bot:
             raise notifyUserException("This is a bot user and as such does not have any characters")
         
-        characters = await self.db.get_available_characters(member.id)
-        pool_id = await self.db.get_pool_by_account(member.id)
-        
-        members = await self.db.fetch(f"SELECT account_id FROM {self.db.acc_table} WHERE pool_id = {pool_id}")
-        if type(members) == tuple: members = [members]
+        async with db_transaction(self.db) as t:
+            characters = await t.get_available_characters(member.id)
+            pool_id = await t.get_pool_by_account(member.id)
+            
+            members = await t.fetch_result(f"SELECT account_id FROM {self.db.acc_table} WHERE pool_id = {pool_id}")
+            if type(members) == tuple: members = [members]
 
         whose_pool_str = 'your' if member == ctx.author else member.display_name+"'s"
         await ctx.send(f"Characters in {whose_pool_str} pool:\n{', '.join([c.name.capitalize() for c in characters])}\n\n" \
@@ -805,17 +795,18 @@ class xp_system(commands.Cog):
             extras={"required_permissions":["manage_pools_self"]}
     )
     async def merge(self, ctx: commands.Context, m1:discord.Member, m2:discord.Member = None):
-        if m1.bot or (m2 and m2.bot):
-            raise notifyUserException("Cannot merge pools with a bot")
-        if m2:
-            a, b = await self.db.get_pool_by_account(m1.id), await self.db.get_pool_by_account(m2.id)
-        else:
-            a, b = await self.db.get_pool_by_account(ctx.author.id), await self.db.get_pool_by_account(m1.id)
-        
-        if await self.ask_confirmation(ctx, f"You are about to merge <@{a}>'s and <@{b}>'s pools"):
-            await self.db.merge_pools(a, b)
+        async with db_transaction(self.db, True) as t:
+            if m1.bot or (m2 and m2.bot):
+                raise notifyUserException("Cannot merge pools with a bot")
+            if m2:
+                a, b = await t.get_pool_by_account(m1.id), await t.get_pool_by_account(m2.id)
+            else:
+                a, b = await t.get_pool_by_account(ctx.author.id), await t.get_pool_by_account(m1.id)
+            
+            if await self.ask_confirmation(ctx, f"You are about to merge <@{a}>'s and <@{b}>'s pools"):
+                await t.merge_pools(a, b)
 
-            await ctx.send(f"Merged <@{a}>'s and <@{b}>'s pools", allowed_mentions=discord.AllowedMentions.none())
+                await ctx.send(f"Merged <@{a}>'s and <@{b}>'s pools", allowed_mentions=discord.AllowedMentions.none())
 
     @pool.command(
             extras={"required_permissions":["manage_pools_self"]}
@@ -833,7 +824,8 @@ class xp_system(commands.Cog):
             if not await self.cog_check(ctx): raise commands.CheckFailure()
 
         if await self.ask_confirmation(ctx, f"You are about to seperate <@{a}>'s characters from <@{b}>'s pool"):
-            await self.db.separate_pools(a, b)
+            async with db_transaction(self.db, True) as t:
+                await t.separate_pools(a, b)
 
             await ctx.send(f"Seperated <@{a}>'s characters from <@{b}>'s pool", allowed_mentions=discord.AllowedMentions.none())
 
@@ -848,7 +840,8 @@ class xp_system(commands.Cog):
             extras={"required_permissions":["debug"]}
     )
     async def period_reset(self, ctx: commands.Context):
-        await self.db.periodic_reset()
+        async with db_transaction(self.db, True) as t:
+            await t.periodic_reset()
         await ctx.send("Reset periodic cap")
 
     @debug.command(
