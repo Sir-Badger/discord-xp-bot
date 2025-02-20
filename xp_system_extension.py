@@ -514,7 +514,7 @@ class xp_system(commands.Cog):
 
     async def periodic_reset(self):
         print("Reseting periodic cap")
-        async with db_transaction(self.db) as t:
+        async with db_transaction(self.db, True) as t:
             await t.execute(f"UPDATE {self.char_table} SET roleplay_xp = 0;")
 
     # discord functionality
