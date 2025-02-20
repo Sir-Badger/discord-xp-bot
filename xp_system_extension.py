@@ -493,10 +493,10 @@ class xp_system(commands.Cog):
                 await ctx.send("Cancelling.")
             return False
 
-    async def check_and_notify_level_up(self, character: player_character):
+    async def check_and_notify_level_up(self, transaction: db_transaction, character: player_character):
         xp_til_level = self._get_xp_until_lvl_up(character)
         if xp_til_level and xp_til_level <= 0 and character.level_notification:
-            await self.db.set_properties_of_character(character.id, level_notification = 0)
+            await transaction.set_properties_of_character(character.id, level_notification = 0)
             notification_channel = self.bot.get_channel(self.notification_channel_id)
             await notification_channel.send(f"> <@{character.active_on_account if character.active_on_account else character.owner_id}>\nYou have enough experience to level up to lvl **{character.level+1}**! :sparkles:")
 
@@ -543,7 +543,7 @@ class xp_system(commands.Cog):
                         words_cached = overflow
                     )
             
-            await self.check_and_notify_level_up(character)
+                await self.check_and_notify_level_up(t, character)
 
         except notifyUserException: # no active character
             pass
@@ -633,9 +633,9 @@ class xp_system(commands.Cog):
             emb.description = "You cannot level up, because you are already at the maximum possible level. Here's some cake :birthday:"
         elif xp_remaining <= 0: # enough to lvl
             character.level += 1
-            await self.db.set_properties_of_character(character.id,
-                                                      level=character.level,
-                                                      level_notification=1)
+            await t.set_properties_of_character(character.id,
+                                                level=character.level,
+                                                level_notification=1)
             emb.title = f"Leveled up to {character.level}!"
             emb.description = "Congrats!" if character.level == self.db.max_level else f"{self._get_xp_until_lvl_up(character)} xp remaining until level {character.level+1}!"
         else: # not enough to lvl
@@ -656,8 +656,7 @@ class xp_system(commands.Cog):
             character.total_xp = character.total_xp + amount if character.total_xp + amount > 0 else 0
 
             await t.set_properties_of_character(character.id, total_xp=character.total_xp)
-
-        await self.check_and_notify_level_up(character)
+            await self.check_and_notify_level_up(t, character)
 
         emb = discord.Embed(title = "Modifying xp",
                             color = character.color if character.color else member.color,
