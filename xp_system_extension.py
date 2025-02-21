@@ -624,23 +624,23 @@ class xp_system(commands.Cog):
         async with db_transaction(self.db) as t:
             character = await t.get_active_character(ctx.author.id)
         
-        xp_remaining = self._get_xp_until_lvl_up(character)
+            xp_remaining = self._get_xp_until_lvl_up(character)
 
-        emb = discord.Embed(color = character.color if character.color else ctx.author.color)
+            emb = discord.Embed(color = character.color if character.color else ctx.author.color)
 
-        if not xp_remaining: # max lvl
-            emb.title = "Already at max level"
-            emb.description = "You cannot level up, because you are already at the maximum possible level. Here's some cake :birthday:"
-        elif xp_remaining <= 0: # enough to lvl
-            character.level += 1
-            await t.set_properties_of_character(character.id,
-                                                level=character.level,
-                                                level_notification=1)
-            emb.title = f"Leveled up to {character.level}!"
-            emb.description = "Congrats!" if character.level == self.db.max_level else f"{self._get_xp_until_lvl_up(character)} xp remaining until level {character.level+1}!"
-        else: # not enough to lvl
-            emb.title = f"Cannot level up"
-            emb.description = f"You don't have enough xp to level up yet\n({self._get_xp_until_lvl_up(character)} xp remaining)"
+            if not xp_remaining: # max lvl
+                emb.title = "Already at max level"
+                emb.description = "You cannot level up, because you are already at the maximum possible level. Here's some cake :birthday:"
+            elif xp_remaining <= 0: # enough to lvl
+                character.level += 1
+                await t.set_properties_of_character(character.id,
+                                                    level=character.level,
+                                                    level_notification=1)
+                emb.title = f"Leveled up to {character.level}!"
+                emb.description = "Congrats!" if character.level == self.db.max_level else f"{self._get_xp_until_lvl_up(character)} xp remaining until level {character.level+1}!"
+            else: # not enough to lvl
+                emb.title = f"Cannot level up"
+                emb.description = f"You don't have enough xp to level up yet\n({self._get_xp_until_lvl_up(character)} xp remaining)"
 
         await ctx.send(embed=emb)
     
